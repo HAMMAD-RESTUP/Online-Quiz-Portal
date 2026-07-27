@@ -1,0 +1,153 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAnonymousStudent() {
+      return signedIn()
+        && request.auth.token.firebase.sign_in_provider == "anonymous";
+    }
+
+    // Simplified admin model used by this project:
+    // every non-anonymous Firebase Authentication user is an admin.
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.firebase.sign_in_provider != "anonymous";
+    }
+
+    function quizIsActive(quizId) {
+      return get(/databases/$(database)/documents/quizzes/$(quizId)).data.isActive == true;
+    }
+
+    function ownsAttempt(attemptId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/attempts/$(attemptId)).data.studentUid
+          == request.auth.uid;
+    }
+
+    match /quizzes/{quizId} {
+      allow get, list: if isAdmin()
+        || (isAnonymousStudent() && resource.data.isActive == true);
+      allow create, update, delete: if isAdmin();
+
+      match /questions/{questionId} {
+        // Anonymous students can read only migrated public question documents.
+        // Correct answers are stored separately in answerKeys.
+        allow get, list: if isAdmin()
+          || (
+            isAnonymousStudent()
+            && quizIsActive(quizId)
+            && resource.data.studentReadable == true
+          );
+        allow create, update, delete: if isAdmin();
+      }
+
+      match /answerKeys/{questionId} {
+        allow read, create, update, delete: if isAdmin();
+      }
+    }
+
+    match /attempts/{attemptId} {
+      allow get: if isAdmin()
+        || (signedIn() && resource.data.studentUid == request.auth.uid);
+      allow list: if isAdmin();
+
+      allow create: if isAnonymousStudent()
+        && request.resource.data.studentUid == request.auth.uid
+        && request.resource.data.status == "in_progress"
+        && request.resource.data.quizId is string
+        && quizIsActive(request.resource.data.quizId)
+        && request.resource.data.questionOrder is list
+        && request.resource.data.questionOrder.size() > 0
+        && request.resource.data.displayOrders is map
+        && request.resource.data.currentIndex == 0
+        && request.resource.data.cheatCount == 0
+        && request.resource.data.cheatTypes is list
+        && request.resource.data.isSuspicious == false
+        && request.resource.data.appMode == "spark-firestore"
+        && request.resource.data.keys().hasOnly([
+          "quizId",
+          "quizCode",
+          "quizTitle",
+          "subject",
+          "studentUid",
+          "studentName",
+          "rollNumber",
+          "normalizedRollNumber",
+          "status",
+          "questionOrder",
+          "displayOrders",
+          "currentIndex",
+          "currentQuestionId",
+          "currentQuestionStartedAt",
+          "currentDeadline",
+          "totalMarks",
+          "cheatCount",
+          "cheatTypes",
+          "isSuspicious",
+          "startedAt",
+          "submittedAt",
+          "appMode"
+        ]);
+
+      allow update: if isAnonymousStudent()
+        && resource.data.studentUid == request.auth.uid
+        && request.resource.data.studentUid == resource.data.studentUid
+        && request.resource.data.quizId == resource.data.quizId
+        && request.resource.data.status in ["in_progress", "completed"]
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "currentIndex",
+          "currentQuestionId",
+          "currentQuestionStartedAt",
+          "currentDeadline",
+          "submittedAt",
+          "cheatCount",
+          "cheatTypes",
+          "isSuspicious",
+          "lastCheatAt"
+        ]);
+
+      allow delete: if false;
+
+      match /answers/{questionId} {
+        allow read: if isAdmin() || ownsAttempt(attemptId);
+        allow create: if isAnonymousStudent()
+          && ownsAttempt(attemptId)
+          && request.resource.data.studentUid == request.auth.uid
+          && request.resource.data.questionId == questionId
+          && request.resource.data.keys().hasOnly([
+            "questionId",
+            "studentUid",
+            "selectedDisplayIndex",
+            "selectedOriginalIndex",
+            "timedOut",
+            "clientReason",
+            "submittedAt"
+          ]);
+        allow update, delete: if false;
+      }
+
+      match /cheatEvents/{eventId} {
+        allow read: if isAdmin() || ownsAttempt(attemptId);
+        allow create: if isAnonymousStudent()
+          && ownsAttempt(attemptId)
+          && request.resource.data.studentUid == request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            "type",
+            "studentUid",
+            "questionId",
+            "serverAt"
+          ]);
+        allow update, delete: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
